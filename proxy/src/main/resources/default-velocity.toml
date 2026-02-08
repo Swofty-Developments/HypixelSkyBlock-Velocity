@@ -177,6 +177,11 @@ tab-complete-rate-limit = 10
 # Setting this to 0 or lower will disable this feature.
 kick-after-rate-limited-tab-completes = 0
 
+# How long (in milliseconds) should the proxy wait between disconnecting a player from one server
+# and connecting them to another when switching servers? This can be useful to give servers time
+# to properly clean up resources. By default, this is disabled (0 milliseconds).
+server-switch-delay = 0
+
 [query]
 # Whether to enable responding to GameSpy 4 query responses or not.
 enabled = false

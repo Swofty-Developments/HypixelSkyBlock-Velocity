@@ -40,6 +40,7 @@ import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -109,59 +110,73 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
 
     // The goods are in hand! We got JoinGame. Let's transition completely to the new state.
     smc.setAutoReading(false);
-    server.getEventManager()
-        .fire(new ServerConnectedEvent(player, serverConn.getServer(), previousServer))
-        .thenRunAsync(() -> {
-          // Make sure we can still transition (player might have disconnected here).
-          if (!serverConn.isActive()) {
-            // Connection is obsolete.
-            serverConn.disconnect();
-            return;
-          }
 
-          // Change the client to use the ClientPlaySessionHandler if required.
-          ClientPlaySessionHandler playHandler;
-          if (player.getConnection()
-              .getActiveSessionHandler() instanceof ClientPlaySessionHandler sessionHandler) {
-            playHandler = sessionHandler;
-          } else {
-            playHandler = new ClientPlaySessionHandler(server, player);
-            player.getConnection().setActiveSessionHandler(StateRegistry.PLAY, playHandler);
-          }
-          assert playHandler != null;
-          playHandler.handleBackendJoinGame(packet, serverConn);
+    // Get the configured server switch delay from the configuration
+    int switchDelay = server.getConfiguration().getServerSwitchDelay();
 
-          // Set the new play session handler for the server. We will have nothing more to do
-          // with this connection once this task finishes up.
-          smc.setActiveSessionHandler(StateRegistry.PLAY,
-              new BackendPlaySessionHandler(server, serverConn));
+    // Create the server connection event async task
+    Runnable transitionTask = () -> {
+      server.getEventManager()
+          .fire(new ServerConnectedEvent(player, serverConn.getServer(), previousServer))
+          .thenRunAsync(() -> {
+            // Make sure we can still transition (player might have disconnected here).
+            if (!serverConn.isActive()) {
+              // Connection is obsolete.
+              serverConn.disconnect();
+              return;
+            }
 
-          // Now set the connected server.
-          serverConn.getPlayer().setConnectedServer(serverConn);
+            // Change the client to use the ClientPlaySessionHandler if required.
+            ClientPlaySessionHandler playHandler;
+            if (player.getConnection()
+                .getActiveSessionHandler() instanceof ClientPlaySessionHandler sessionHandler) {
+              playHandler = sessionHandler;
+            } else {
+              playHandler = new ClientPlaySessionHandler(server, player);
+              player.getConnection().setActiveSessionHandler(StateRegistry.PLAY, playHandler);
+            }
+            assert playHandler != null;
+            playHandler.handleBackendJoinGame(packet, serverConn);
 
-          // Clean up disabling auto-read while the connected event was being processed.
-          // Do this after setting the connection, so no incoming packets are processed before
-          // the API knows which server the player is connected to.
-          smc.setAutoReading(true);
+            // Set the new play session handler for the server. We will have nothing more to do
+            // with this connection once this task finishes up.
+            smc.setActiveSessionHandler(StateRegistry.PLAY,
+                new BackendPlaySessionHandler(server, serverConn));
 
-          // Send client settings. In 1.20.2+ this is done in the config state.
-          if (smc.getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)
-              && player.getClientSettingsPacket() != null) {
-            serverConn.ensureConnected().write(player.getClientSettingsPacket());
-          }
+            // Now set the connected server.
+            serverConn.getPlayer().setConnectedServer(serverConn);
 
-          // We're done! :)
-          server.getEventManager().fireAndForget(new ServerPostConnectEvent(player,
-              previousServer));
-          resultFuture.complete(ConnectionRequestResults.successful(serverConn.getServer()));
-        }, smc.eventLoop()).exceptionally(exc -> {
-          logger.error("Unable to switch to new server {} for {}",
-              serverConn.getServerInfo().getName(),
-              player.getUsername(), exc);
-          player.disconnect(ConnectionMessages.INTERNAL_SERVER_CONNECTION_ERROR);
-          resultFuture.completeExceptionally(exc);
-          return null;
-        });
+            // Clean up disabling auto-read while the connected event was being processed.
+            // Do this after setting the connection, so no incoming packets are processed before
+            // the API knows which server the player is connected to.
+            smc.setAutoReading(true);
+
+            // Send client settings. In 1.20.2+ this is done in the config state.
+            if (smc.getProtocolVersion().lessThan(ProtocolVersion.MINECRAFT_1_20_2)
+                && player.getClientSettingsPacket() != null) {
+              serverConn.ensureConnected().write(player.getClientSettingsPacket());
+            }
+
+            // We're done! :)
+            server.getEventManager().fireAndForget(new ServerPostConnectEvent(player,
+                previousServer));
+            resultFuture.complete(ConnectionRequestResults.successful(serverConn.getServer()));
+          }, smc.eventLoop()).exceptionally(exc -> {
+            logger.error("Unable to switch to new server {} for {}",
+                serverConn.getServerInfo().getName(),
+                player.getUsername(), exc);
+            player.disconnect(ConnectionMessages.INTERNAL_SERVER_CONNECTION_ERROR);
+            resultFuture.completeExceptionally(exc);
+            return null;
+          });
+    };
+
+    // Schedule the transition task with the configured delay
+    if (switchDelay > 0) {
+      smc.eventLoop().schedule(transitionTask, switchDelay, TimeUnit.MILLISECONDS);
+    } else {
+      transitionTask.run();
+    }
 
     return true;
   }
