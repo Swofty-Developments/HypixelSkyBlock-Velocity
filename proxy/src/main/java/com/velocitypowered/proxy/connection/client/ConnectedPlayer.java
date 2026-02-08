@@ -116,6 +116,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.audience.MessageType;
@@ -183,6 +184,9 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   private final boolean onlineMode;
   private @Nullable VelocityServerConnection connectedServer;
   private @Nullable VelocityServerConnection connectionInFlight;
+
+  private @Nullable ScheduledFuture<?> pendingServerSwitch;
+
   private @Nullable PlayerSettings settings;
   private @Nullable ModInfo modInfo;
   private final Set<VelocityBossBarImplementation> bossBars = new HashSet<>();
@@ -665,6 +669,10 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
     if (server.getConfiguration().isLogPlayerConnections()) {
       logger.info(Component.text(this + " has disconnected: ").append(translated));
     }
+
+    // Abort any delayed server switch before closing the client connection.
+    cancelPendingServerSwitch();
+
     connection.closeWith(DisconnectPacket.create(translated,
             this.getProtocolVersion(), connection.getState()));
   }
@@ -683,6 +691,14 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   public void resetInFlightConnection() {
     connectionInFlight = null;
+    cancelPendingServerSwitch();
+  }
+
+  private void cancelPendingServerSwitch() {
+    if (pendingServerSwitch != null) {
+      pendingServerSwitch.cancel(false);
+      pendingServerSwitch = null;
+    }
   }
 
   /**
@@ -952,12 +968,13 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
   }
 
   void teardown() {
-    if (connectionInFlight != null) {
-      connectionInFlight.disconnect();
-    }
-    if (connectedServer != null) {
-      connectedServer.disconnect();
-    }
+    cancelPendingServerSwitch();
+     if (connectionInFlight != null) {
+       connectionInFlight.disconnect();
+     }
+     if (connectedServer != null) {
+       connectedServer.disconnect();
+     }
 
     Optional<Player> connectedPlayer = server.getPlayer(this.getUniqueId());
     server.unregisterConnection(this);
@@ -1492,7 +1509,43 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
               new VelocityServerConnection(vrs, previousServer, ConnectedPlayer.this, server);
           connectionInFlight = con;
 
-          return con.connect().whenCompleteAsync((result, exception) -> {
+          // Cancel any previously scheduled server switch.
+          cancelPendingServerSwitch();
+
+          final long delayMs = server.getConfiguration().getServerSwitchDelay();
+          final boolean isSwitch = previousServer != null;
+
+          final CompletableFuture<Impl> connectFuture;
+          if (isSwitch && delayMs > 0) {
+            final VelocityServerConnection currentlyConnected = connectedServer;
+            if (currentlyConnected != null) {
+              // This will immediately close the backend channel; it does not affect client connection.
+              currentlyConnected.disconnect();
+            }
+
+            connectFuture = new CompletableFuture<>();
+            pendingServerSwitch = connection.eventLoop().schedule(() -> {
+              // If the player disconnected or a new connection attempt replaced this one, abort safely.
+              if (!isActive() || connectionInFlight != con) {
+                connectFuture.complete(plainResult(ConnectionRequestBuilder.Status.CONNECTION_CANCELLED,
+                    realDestination));
+                return;
+              }
+
+              pendingServerSwitch = null;
+              con.connect().whenComplete((res, ex) -> {
+                if (ex != null) {
+                  connectFuture.completeExceptionally(ex);
+                } else {
+                  connectFuture.complete(res);
+                }
+              });
+            }, delayMs, TimeUnit.MILLISECONDS);
+          } else {
+            connectFuture = con.connect();
+          }
+
+          return connectFuture.whenCompleteAsync((result, exception) -> {
             if (result != null && !result.isSuccessful() && !result.isSafe()) {
               handleConnectionException(result.getAttemptedConnection(),
                   // The only way for the reason to be null is if the result is safe
@@ -1500,8 +1553,7 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
                       getProtocolVersion(), connection.getState()), false);
             }
             this.resetIfInFlightIs(con);
-          },
-              connection.eventLoop());
+          }, connection.eventLoop());
         }, connection.eventLoop());
       });
     }
