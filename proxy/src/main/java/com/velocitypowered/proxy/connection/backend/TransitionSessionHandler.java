@@ -38,7 +38,6 @@ import com.velocitypowered.proxy.protocol.packet.DisconnectPacket;
 import com.velocitypowered.proxy.protocol.packet.JoinGamePacket;
 import com.velocitypowered.proxy.protocol.packet.KeepAlivePacket;
 import com.velocitypowered.proxy.protocol.packet.PluginMessagePacket;
-import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.LogManager;
@@ -91,7 +90,7 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public boolean handle(JoinGamePacket packet) {
-    MinecraftConnection smc = serverConn.ensureConnected();
+    final MinecraftConnection smc = serverConn.ensureConnected();
     final RegisteredServer previousServer = serverConn.getPreviousServer().orElse(null);
     final ConnectedPlayer player = serverConn.getPlayer();
     final VelocityServerConnection existingConnection = player.getConnectedServer();
@@ -107,6 +106,9 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
 
     // Reset Tablist header and footer to prevent desync
     player.clearPlayerListHeaderAndFooter();
+
+    // Override online mode
+    packet.setOnlineMode(player.isOnlineMode());
 
     // The goods are in hand! We got JoinGame. Let's transition completely to the new state.
     smc.setAutoReading(false);
@@ -214,7 +216,7 @@ public class TransitionSessionHandler implements MinecraftSessionHandler {
 
   @Override
   public void disconnected() {
-    resultFuture
-        .completeExceptionally(new IOException("Unexpectedly disconnected from remote server"));
+    resultFuture.complete(ConnectionRequestResults.forDisconnect(
+        ConnectionMessages.INTERNAL_SERVER_CONNECTION_ERROR, serverConn.getServer()));
   }
 }
