@@ -971,12 +971,12 @@ public class ConnectedPlayer implements MinecraftConnectionAssociation, Player, 
 
   void teardown() {
     cancelPendingServerSwitch();
-     if (connectionInFlight != null) {
-       connectionInFlight.disconnect();
-     }
-     if (connectedServer != null) {
-       connectedServer.disconnect();
-     }
+    if (connectionInFlight != null) {
+      connectionInFlight.disconnect();
+    }
+    if (connectedServer != null) {
+      connectedServer.disconnect();
+    }
 
     Optional<Player> connectedPlayer = server.getPlayer(this.getUniqueId());
     server.unregisterConnection(this);
